@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    container_name: umag_bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # База данных и логи сохраняются на хосте
+      - ./data:/app/data
+      - ./logs:/app/logs
