@@ -46,6 +46,14 @@ class SkipBarcodeCb(CallbackData, prefix="skipbc"):
     """Пропустить сканирование штрихкода, добавить без него."""
     item_idx: int
 
+class UmagUploadCb(CallbackData, prefix="umag"):
+    """Загрузить приёмку напрямую в Umag."""
+    session_id: int
+
+class EditQtyCb(CallbackData, prefix="editqty"):
+    """Исправить количество или цену позиции."""
+    item_idx: int
+
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
@@ -107,7 +115,13 @@ def item_keyboard(
             ),
         ])
 
-    # Всегда показываем опцию «добавить в Excel без базы»
+    # Изменить количество/цену + добавить в Excel
+    btns.append([
+        InlineKeyboardButton(
+            text="✏️ Изменить кол-во/цену",
+            callback_data=EditQtyCb(item_idx=item_idx).pack(),
+        ),
+    ])
     btns.append([
         InlineKeyboardButton(
             text="➕ Добавить в Excel",
@@ -215,10 +229,18 @@ def weight_mode_keyboard(item_idx: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def export_keyboard(session_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
+def export_keyboard(session_id: int, umag_enabled: bool = False) -> InlineKeyboardMarkup:
+    rows = [[
         InlineKeyboardButton(
-            text="📥 Скачать Excel для Umag",
+            text="📥 Скачать Excel",
             callback_data=ExportCb(session_id=session_id).pack(),
         )
-    ]])
+    ]]
+    if umag_enabled:
+        rows.append([
+            InlineKeyboardButton(
+                text="📤 Загрузить в Umag",
+                callback_data=UmagUploadCb(session_id=session_id).pack(),
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

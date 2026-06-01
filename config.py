@@ -18,6 +18,11 @@ AUTO_MATCH_THRESHOLD: float = float(os.getenv("AUTO_MATCH_THRESHOLD", "0.82"))
 SUGGEST_THRESHOLD: float = float(os.getenv("SUGGEST_THRESHOLD", "0.40"))
 MAX_SUGGESTIONS: int = int(os.getenv("MAX_SUGGESTIONS", "5"))
 
+# ── Umag API ──────────────────────────────────────────────────────────────
+UMAG_LOGIN: str = os.getenv("UMAG_LOGIN", "")
+UMAG_PASSWORD: str = os.getenv("UMAG_PASSWORD", "")
+UMAG_STORE_ID: int = int(os.getenv("UMAG_STORE_ID", "0"))
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env файле")
 if not GEMINI_API_KEY:

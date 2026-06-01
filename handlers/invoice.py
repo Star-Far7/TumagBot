@@ -29,10 +29,14 @@ from config import (
     AUTO_MATCH_THRESHOLD,
     MAX_SUGGESTIONS,
     SUGGEST_THRESHOLD,
+    UMAG_LOGIN,
+    UMAG_PASSWORD,
+    UMAG_STORE_ID,
 )
 from db.database import Database
 from keyboards.kb import (
     AddNewCb,
+    EditQtyCb,
     ExportCb,
     MatchCb,
     PackSizeCb,
@@ -41,6 +45,7 @@ from keyboards.kb import (
     SkipBarcodeCb,
     SkipCb,
     StartReviewCb,
+    UmagUploadCb,
     WeightModeCb,
     barcode_skip_keyboard,
     collecting_keyboard,
@@ -77,6 +82,7 @@ class InvoiceState(StatesGroup):
     searching     = State()   # ручной поиск товара
     weight_input  = State()   # ввод количества штук для весового товара
     barcode_photo = State()   # ожидание фото штрихкода нового товара
+    editing_qty   = State()   # ввод исправленного количества/цены
 
 
 def _allowed(user_id: int) -> bool:
@@ -89,6 +95,42 @@ _ALIAS_THRESHOLD = 0.80   # ≥80% — авто-совпадение по али
 _NUM_PENALTY     = 0.28   # штраф за каждый несовпавший числовой маркер (%, объём…)
 _ALL_NUMS_RE     = _re.compile(r'\d+[.,]?\d*')
 
+_WORD_TOKEN_RE = _re.compile(r'[a-zA-Z]+|[а-яёА-ЯЁ]{2,}')
+_TOKEN_PENALTY = 0.20   # штраф за каждое слово-модификатор, отсутствующее в другой строке
+
+# Общие слова-заполнители: не штрафовать за их наличие/отсутствие
+_FILLER_WORDS = {
+    "сигареты", "сигарета", "шт", "уп", "упак", "упаковка", "кор", "коробка",
+    "бут", "бутылка", "пачка", "пач", "блок", "штук",
+}
+
+
+def _compute_alias_score(query: str, alias_name: str) -> float:
+    """
+    Комбинированный скоринг: token_sort_ratio − числовой штраф − словесный штраф.
+
+    Словесный штраф: за каждое «значимое» слово (≥2 буквы, не filler), которое
+    есть в одной строке, но нет в другой, вычитаем 0.20.
+    Это не даёт «Esse Exchange W» сматчиться с «Esse Exchange» (штраф 0.20 за «W»... нет, W — 1 буква).
+    Зато «Cold Black» vs без них даёт −0.40 → не пройдёт порог.
+    """
+    text_score = fuzz.token_sort_ratio(query, alias_name) / 100.0
+
+    # Числовой штраф
+    q_nums = {m.group().replace(',', '.') for m in _ALL_NUMS_RE.finditer(query)}
+    a_nums = {m.group().replace(',', '.') for m in _ALL_NUMS_RE.finditer(alias_name)}
+    num_diff = q_nums.symmetric_difference(a_nums)
+    penalty = len(num_diff) * _NUM_PENALTY
+
+    # Словесный штраф: несовпавшие значимые слова
+    q_words = {w.lower() for w in _WORD_TOKEN_RE.findall(query)} - _FILLER_WORDS
+    a_words = {w.lower() for w in _WORD_TOKEN_RE.findall(alias_name)} - _FILLER_WORDS
+    word_diff = q_words.symmetric_difference(a_words)
+    penalty += len(word_diff) * _TOKEN_PENALTY
+
+    return max(0.0, text_score - penalty)
+
+
 def _find_best_alias(
     query: str,
     barcode: Optional[str],
@@ -99,11 +141,8 @@ def _find_best_alias(
 
     Порядок поиска:
       1. Точное совпадение имени → score=1.0
-      2. Точное совпадение по штрихкоду поставщика → score=1.0
-      3. Нечёткое сравнение: token_sort_ratio − числовой штраф
-
-    Числовой штраф (−0.28 за каждый маркер): «2,5%» vs «6%» = −0.28,
-    что превращает 97% в 69% → не пройдёт порог 80%.
+      2. Штрихкод поставщика + проверка имени (≥60%) → score по имени
+      3. Нечёткое сравнение: token_sort_ratio − числовой штраф − словесный штраф
 
     Возвращает (alias_dict, score, how) или (None, 0, "").
     how: "exact" / "barcode" / "fuzzy"
@@ -118,31 +157,28 @@ def _find_best_alias(
         if a["supplier_name"].lower().strip() == q_lower:
             return a, 1.0, "exact"
 
-    # ── Приоритет 2: штрихкод поставщика ─────────────────────────────────
+    # ── Приоритет 2: штрихкод поставщика + верификация имени ─────────────
+    # Штрихкод может быть общим для группы товаров (номенклатурный код),
+    # поэтому обязательно проверяем что название тоже похоже.
     if barcode:
+        best_bc_alias = None
+        best_bc_score = 0.0
         for a in aliases:
             if a.get("supplier_barcode") and a["supplier_barcode"] == barcode:
-                return a, 1.0, "barcode"
+                name_score = _compute_alias_score(q_lower, a["supplier_name"].lower())
+                if name_score > best_bc_score:
+                    best_bc_score = name_score
+                    best_bc_alias = a
+        if best_bc_alias and best_bc_score >= 0.60:
+            return best_bc_alias, best_bc_score, "barcode"
 
-    # ── Приоритет 3: нечёткое сравнение с числовым штрафом ───────────────
-    # Извлекаем ВСЕ числа из запроса (включая без единиц: «925м» → «925»).
-    # Штраф за каждое число которого НЕТ в другой строке.
-    # «2.5%» vs «6%»: числа 2.5 и 6 не совпадают → штраф 0.56 → не пройдёт.
-    # «925м» vs «925мл»: число 925 есть с обеих сторон → без штрафа.
-    q_all_nums = {m.group().replace(',', '.') for m in _ALL_NUMS_RE.finditer(q_lower)}
-
+    # ── Приоритет 3: нечёткое сравнение с штрафами ───────────────────────
     best_alias: Optional[Dict] = None
     best_score = 0.0
 
     for a in aliases:
         a_name = a["supplier_name"].lower()
-        text_score = fuzz.token_sort_ratio(q_lower, a_name) / 100.0
-
-        a_all_nums = {m.group().replace(',', '.') for m in _ALL_NUMS_RE.finditer(a_name)}
-        hard_diff  = q_all_nums.symmetric_difference(a_all_nums)
-        penalty    = len(hard_diff) * _NUM_PENALTY
-
-        score = max(0.0, text_score - penalty)
+        score = _compute_alias_score(q_lower, a_name)
 
         if score > best_score:
             best_score = score
@@ -491,6 +527,19 @@ async def _show_item(
         f"{barcode_note}"
     )
 
+    _edit_btn = InlineKeyboardButton(
+        text="✏️ Изменить кол-во/цену",
+        callback_data=EditQtyCb(item_idx=item_idx).pack(),
+    )
+    _search_btn = InlineKeyboardButton(
+        text="🔄 Другой товар",
+        callback_data=SearchCb(item_idx=item_idx).pack(),
+    )
+    _skip_btn = InlineKeyboardButton(
+        text="⏭ Пропустить",
+        callback_data=SkipCb(item_idx=item_idx).pack(),
+    )
+
     # Весовой товар, уже сопоставленный (alias / barcode) — сразу спросить режим
     if item.get("is_weight") and match_type in ("alias", "exact_barcode"):
         text = (
@@ -498,7 +547,10 @@ async def _show_item(
             f"⚖️ Товар: <b>{result['product_name']}</b>\n"
             f"Как учитывать весовой товар?"
         )
-        kb = weight_mode_keyboard(item_idx)
+        wm_kb = weight_mode_keyboard(item_idx)
+        wm_kb.inline_keyboard.append([_search_btn, _skip_btn])
+        wm_kb.inline_keyboard.append([_edit_btn])
+        kb = wm_kb
     # Контейнерный товар, уже сопоставленный (alias / barcode) — подтвердить и задать штучность
     elif _is_container(unit_str) and match_type in ("alias", "exact_barcode"):
         text = (
@@ -511,10 +563,8 @@ async def _show_item(
                 text=f"✅ {result['product_name'][:48]}",
                 callback_data=MatchCb(item_idx=item_idx, product_id=result["product_id"]).pack(),
             )],
-            [InlineKeyboardButton(
-                text="⏭ Пропустить",
-                callback_data=SkipCb(item_idx=item_idx).pack(),
-            )],
+            [_search_btn, _skip_btn],
+            [_edit_btn],
         ])
     # Уже сопоставленный товар (alias/barcode), но цена = 0 — OCR не считал данные
     elif match_type in ("alias", "exact_barcode") and result.get("product_id"):
@@ -530,16 +580,8 @@ async def _show_item(
                 text=f"✅ {prod_name[:48]}",
                 callback_data=MatchCb(item_idx=item_idx, product_id=result["product_id"]).pack(),
             )],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Другой товар",
-                    callback_data=SearchCb(item_idx=item_idx).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="⏭ Пропустить",
-                    callback_data=SkipCb(item_idx=item_idx).pack(),
-                ),
-            ],
+            [_search_btn, _skip_btn],
+            [_edit_btn],
         ])
     elif match_type == "auto" and suggestions:
         best      = suggestions[0]
@@ -760,7 +802,7 @@ async def on_search_query(message: Message, state: FSMContext, db: Database):
 @router.message(F.text == "/cancel")
 async def cmd_cancel(message: Message, state: FSMContext):
     current = await state.get_state()
-    if current in (InvoiceState.collecting, InvoiceState.reviewing, InvoiceState.searching, InvoiceState.weight_input, InvoiceState.barcode_photo):
+    if current in (InvoiceState.collecting, InvoiceState.reviewing, InvoiceState.searching, InvoiceState.weight_input, InvoiceState.barcode_photo, InvoiceState.editing_qty):
         await state.clear()
         await message.answer("🚫 Обработка накладной отменена.")
     else:
@@ -837,6 +879,61 @@ async def on_export(cb: CallbackQuery, callback_data: ExportCb, db: Database):
         )
     finally:
         os.unlink(tmp_path)
+
+
+# ── Загрузка в Umag ─────────────────────────────────────────────────────────
+
+@router.callback_query(UmagUploadCb.filter())
+async def on_umag_upload(cb: CallbackQuery, callback_data: UmagUploadCb, db: Database):
+    from services.umag_api import UmagAPI, UmagAPIError
+
+    await cb.answer("Загружаю в Umag…")
+    status = await cb.message.answer("📤 Подключаюсь к Umag…")
+
+    items = await db.get_session_items(callback_data.session_id)
+    if not items:
+        await status.edit_text("❌ Данные сессии не найдены.")
+        return
+
+    api = UmagAPI(
+        store_id=UMAG_STORE_ID,
+        login=UMAG_LOGIN,
+        password=UMAG_PASSWORD,
+    )
+
+    try:
+        await status.edit_text("🔐 Авторизация в Umag…")
+        await api.login()
+
+        await status.edit_text("📦 Создаю приёмку и добавляю товары…")
+        result = await api.upload_invoice(items=items)
+
+        supply_id = result["supply_id"]
+        count     = result["products_count"]
+        total     = result["total_amount"]
+
+        await status.edit_text(
+            f"✅ <b>Приёмка создана в Umag!</b>\n\n"
+            f"📋 Номер: <b>{supply_id}</b>\n"
+            f"📦 Товаров: <b>{count}</b>\n"
+            f"💰 Сумма: <b>{total:,.2f} тг</b>\n\n"
+            f"Откройте Umag → Закупки → выберите поставщика и нажмите «Провести».",
+            parse_mode="HTML",
+        )
+    except UmagAPIError as e:
+        logger.error("Umag API ошибка: %s", e)
+        await status.edit_text(
+            f"❌ <b>Ошибка Umag API</b>\n\n"
+            f"<code>{e.message[:200]}</code>\n\n"
+            "Проверьте настройки UMAG_LOGIN / UMAG_PASSWORD в .env",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Ошибка загрузки в Umag")
+        await status.edit_text(
+            f"❌ Ошибка: <code>{type(e).__name__}: {str(e)[:200]}</code>",
+            parse_mode="HTML",
+        )
 
 
 # ── Вспомогательные функции ───────────────────────────────────────────────────
@@ -1227,6 +1324,95 @@ async def on_weight_count(message: Message, state: FSMContext, db: Database):
     await _advance_from_message(message, state, db, results, data)
 
 
+# ── Редактирование количества / цены ─────────────────────────────────────────
+
+@router.callback_query(EditQtyCb.filter())
+async def on_edit_qty(cb: CallbackQuery, callback_data: EditQtyCb, state: FSMContext):
+    current = await state.get_state()
+    if current not in (InvoiceState.reviewing, InvoiceState.searching):
+        await cb.answer("Нет активной сессии.", show_alert=True)
+        return
+
+    item_idx = callback_data.item_idx
+    data     = await state.get_data()
+    item     = data["items"][item_idx]
+
+    qty   = item.get("quantity", 1)
+    price = item.get("price", 0)
+
+    await state.set_state(InvoiceState.editing_qty)
+    await state.update_data(editing_item_idx=item_idx)
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await cb.answer()
+    await cb.message.answer(
+        f"✏️ <b>Редактирование: {item['name']}</b>\n\n"
+        f"Сейчас: кол-во=<b>{qty}</b>, цена=<b>{price:.2f}</b>\n\n"
+        f"Введите новые значения в формате:\n"
+        f"<code>количество цена</code>\n\n"
+        f"Примеры:\n"
+        f"• <code>12 450</code> — кол-во 12, цена 450\n"
+        f"• <code>12</code> — только кол-во (цена останется {price:.2f})\n"
+        f"• <code>. 450</code> — только цена (кол-во останется {qty})",
+        parse_mode="HTML",
+    )
+
+
+@router.message(InvoiceState.editing_qty, F.text, ~F.text.startswith("/"))
+async def on_edit_qty_input(message: Message, state: FSMContext, db: Database):
+    data     = await state.get_data()
+    item_idx = data["editing_item_idx"]
+    items    = data["items"]
+    results  = data["results"]
+    item     = items[item_idx]
+
+    parts = message.text.strip().replace(",", ".").split()
+
+    new_qty   = item["quantity"]
+    new_price = item["price"]
+
+    try:
+        if len(parts) == 1:
+            val = float(parts[0])
+            if val <= 0:
+                raise ValueError
+            new_qty = val
+        elif len(parts) >= 2:
+            if parts[0] != ".":
+                new_qty = float(parts[0])
+                if new_qty <= 0:
+                    raise ValueError
+            new_price = float(parts[1])
+            if new_price < 0:
+                raise ValueError
+        else:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат. Введите: <code>количество цена</code>\n"
+            "Например: <code>12 450</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    items[item_idx]["quantity"] = new_qty
+    items[item_idx]["price"]   = new_price
+
+    await state.set_state(InvoiceState.reviewing)
+    await state.update_data(items=items)
+
+    await message.answer(
+        f"✅ <b>Обновлено:</b> кол-во={new_qty}, цена={new_price:.2f}",
+        parse_mode="HTML",
+    )
+
+    await _show_item(message, state, db)
+
+
 async def _finalize(message: Message, state: FSMContext, db: Database):
     """Сохранить все позиции, обновить цены, показать итог."""
     data       = await state.get_data()
@@ -1320,6 +1506,9 @@ async def _finalize(message: Message, state: FSMContext, db: Database):
         f"{new_note}"
         f"{price_note}\n\n"
         f"Нажмите кнопку для получения Excel-файла:",
-        reply_markup=export_keyboard(session_id),
+        reply_markup=export_keyboard(
+            session_id,
+            umag_enabled=bool(UMAG_LOGIN and UMAG_PASSWORD and UMAG_STORE_ID),
+        ),
         parse_mode="HTML",
     )
