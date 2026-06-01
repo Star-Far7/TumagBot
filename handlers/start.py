@@ -1,11 +1,12 @@
 import html
 import os
+import shutil
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 
-from config import ALLOWED_USERS, LOG_FILE
+from config import ALLOWED_USERS, DATABASE_PATH, LOG_FILE
 from db.database import Database
 
 router = Router()
@@ -125,6 +126,83 @@ async def cmd_logs(message: Message):
         f"<pre>{html.escape(tail)}</pre>",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("dbbackup"))
+async def cmd_dbbackup(message: Message):
+    """Скачать файл базы данных через Telegram."""
+    if not _allowed(message.from_user.id):
+        return
+
+    if not os.path.exists(DATABASE_PATH):
+        await message.answer("❌ Файл базы данных не найден.")
+        return
+
+    try:
+        await message.answer_document(
+            FSInputFile(DATABASE_PATH, filename="umag_bot.db"),
+            caption="📦 Резервная копия базы данных",
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("dbrestore"))
+async def cmd_dbrestore_hint(message: Message):
+    """Подсказка — как восстановить базу."""
+    if not _allowed(message.from_user.id):
+        return
+    await message.answer(
+        "📦 <b>Восстановление базы</b>\n\n"
+        "Отправьте файл <code>umag_bot.db</code> "
+        "(тот что скачали через /dbbackup) как документ.\n\n"
+        "⚠️ Текущая база будет заменена!",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.document.file_name == "umag_bot.db")
+async def on_db_restore(message: Message, db: Database):
+    """Принять файл umag_bot.db и заменить текущую базу."""
+    if not _allowed(message.from_user.id):
+        return
+
+    status = await message.answer("⏳ Загружаю базу…")
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        await message.bot.download(message.document, destination=tmp_path)
+
+        # Проверить что файл — валидный SQLite
+        import aiosqlite
+        async with aiosqlite.connect(tmp_path) as check_db:
+            async with check_db.execute("SELECT COUNT(*) FROM products") as cur:
+                count = (await cur.fetchone())[0]
+
+        # Заменить текущую базу
+        backup_path = DATABASE_PATH + ".bak"
+        if os.path.exists(DATABASE_PATH):
+            shutil.copy2(DATABASE_PATH, backup_path)
+
+        shutil.copy2(tmp_path, DATABASE_PATH)
+
+        # Переинициализировать (применить миграции если нужно)
+        await db.init()
+
+        await status.edit_text(
+            f"✅ <b>База восстановлена!</b>\n\n"
+            f"Товаров: <b>{count}</b>\n"
+            f"Резервная копия старой базы: <code>{backup_path}</code>\n\n"
+            "Перезапустите бота для полной загрузки.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await status.edit_text(f"❌ Ошибка: файл повреждён или не является базой бота.\n<code>{e}</code>", parse_mode="HTML")
+    finally:
+        os.unlink(tmp_path)
 
 
 @router.message(Command("stats"))
