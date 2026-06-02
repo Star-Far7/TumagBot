@@ -69,12 +69,12 @@ def _hdr(ws, col: int, row: int, value: str):
 def _fill_umag_sheet(ws, items: List[Dict]):
     """
     Чистая таблица для импорта в Umag:
-    штрихкод | наименование | ед.изм. | кол-во | цена закупа | продажная цена
+    штрихкод | наименование | ед.изм. | кол-во | цена закупа
     Без заголовков, без дат, без итогов. Пропущенные позиции не включаются.
     """
     ws.title = "Для Umag"
 
-    col_widths = [18, 46, 8, 8, 13, 13]
+    col_widths = [18, 46, 8, 8, 13]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -82,14 +82,13 @@ def _fill_umag_sheet(ws, items: List[Dict]):
         if item.get("match_type") == "skipped":
             continue
 
-        barcode      = item.get("product_barcode") or item.get("supplier_barcode") or ""
-        name         = item.get("product_name") or item.get("supplier_name") or "—"
-        unit         = item.get("unit") or "шт"
-        qty          = item.get("quantity") or 1
-        unit_price   = item.get("price") or 0.0
-        sell_price   = item.get("selling_price") or 0.0
+        barcode    = item.get("product_barcode") or item.get("supplier_barcode") or ""
+        name       = item.get("product_name") or item.get("supplier_name") or "—"
+        unit       = item.get("unit") or "шт"
+        qty        = item.get("quantity") or 1
+        unit_price = item.get("price") or 0.0
 
-        row_data = [barcode, name, unit, qty, unit_price, sell_price]
+        row_data = [barcode, name, unit, qty, unit_price]
         ws.append(row_data)
 
         r = ws.max_row
@@ -100,8 +99,6 @@ def _fill_umag_sheet(ws, items: List[Dict]):
         ws.cell(r, 4).number_format = "#,##0.##"
         ws.cell(r, 5).alignment = _RIGHT
         ws.cell(r, 5).number_format = _NUM_FMT
-        ws.cell(r, 6).alignment = _RIGHT
-        ws.cell(r, 6).number_format = _NUM_FMT
 
 
 # ── Лист 2: «Детали» ──────────────────────────────────────────────────────────

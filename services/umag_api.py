@@ -228,7 +228,6 @@ class UmagAPI:
 
             qty = item.get("quantity") or 1
             price = item.get("price") or 0
-            selling_price = item.get("selling_price") or 0
 
             try:
                 barcode_num = int(barcode)
@@ -240,7 +239,6 @@ class UmagAPI:
                 "quantity": qty,
                 "discount": 0,
                 "price": price,
-                "sellingPrice": selling_price,
                 "arrivalCost": price,
                 "type": "PRODUCT",
             })
