@@ -1,7 +1,36 @@
 from typing import Dict, List, Optional
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+
+
+# ── Постоянная reply-клавиатура (главное меню) ────────────────────────────────
+
+# Тексты кнопок — используются и в клавиатуре, и в обработчиках текста
+BTN_UPLOAD   = "📤 Загрузить каталог"
+BTN_CATALOG  = "📦 Каталог"
+BTN_ALIASES  = "📚 Псевдонимы"
+BTN_STATS    = "📊 Статистика"
+BTN_CANCEL   = "❌ Отмена"
+BTN_HELP     = "ℹ️ Помощь"
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Постоянное меню внизу экрана с основными действиями."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_UPLOAD), KeyboardButton(text=BTN_CATALOG)],
+            [KeyboardButton(text=BTN_ALIASES), KeyboardButton(text=BTN_STATS)],
+            [KeyboardButton(text=BTN_CANCEL), KeyboardButton(text=BTN_HELP)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 # ── Callback data schemas ─────────────────────────────────────────────────────

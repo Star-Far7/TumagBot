@@ -63,6 +63,14 @@ from services.product_matcher import ProductMatcher
 # Паттерн маркера товара из инлайн-результата
 _PID_RE = _re.compile(r"🔖(\d+)")
 
+# Запрос «выглядит как штрихкод», если после удаления пробелов/дефисов остаются
+# только цифры в количестве 4-20 (EAN-13/UPC и пр.).
+_BARCODE_QUERY_RE = _re.compile(r"^\d{4,20}$")
+
+def _looks_like_barcode(text: str) -> bool:
+    cleaned = text.replace(" ", "").replace("-", "")
+    return bool(_BARCODE_QUERY_RE.match(cleaned))
+
 # Контейнерные единицы: цена в накладной — за упаковку, нужен вопрос о штучности
 _CONTAINER_UNITS = {
     "кор", "кор.", "уп", "уп.", "упак", "упак.", "упаковка",
@@ -204,9 +212,14 @@ async def handle_photo(message: Message, state: FSMContext, db: Database):
         await _handle_barcode_photo(message, state, db)
         return
 
+    # В режиме ручного поиска — фото это штрихкод искомого товара
+    if current == InvoiceState.searching:
+        await _handle_search_barcode_photo(message, state, db)
+        return
+
     is_next_page = (current == InvoiceState.collecting)
 
-    if current in (InvoiceState.reviewing, InvoiceState.searching, InvoiceState.weight_input):
+    if current in (InvoiceState.reviewing, InvoiceState.weight_input):
         await message.answer(
             "⚠️ Уже идёт проверка накладной. Завершите её или отправьте /cancel для отмены."
         )
@@ -680,11 +693,15 @@ async def on_search_start(cb: CallbackQuery, callback_data: SearchCb, state: FSM
 
     await cb.message.answer(
         "🔍 <b>Найти товар вручную</b>\n\n"
-        "<b>Способ 1 — набрать текст прямо здесь:</b>\n"
-        "Введите название или часть названия:\n\n"
-        f"<b>Способ 2 — инлайн-поиск (рекомендуется):</b>\n"
-        f"Введите в строке ввода: <code>@{username} запрос</code>\n"
-        "Выберите товар из выпадающего списка — он вставится сюда автоматически.",
+        "<b>Способ 1 — текст:</b>\n"
+        "Введите название или часть названия товара.\n\n"
+        "<b>Способ 2 — штрихкод цифрами:</b>\n"
+        "Введите цифры штрихкода (4-20 цифр) — найду точное совпадение.\n\n"
+        "<b>Способ 3 — фото штрихкода:</b>\n"
+        "Сфотографируйте штрихкод — нейросеть считает его и найдёт товар.\n\n"
+        f"<b>Способ 4 — инлайн-поиск:</b>\n"
+        f"В строке ввода: <code>@{username} запрос</code>\n"
+        "(работает и по названию, и по штрихкоду — выберите товар из списка).",
         reply_markup=search_cancel_keyboard(callback_data.item_idx),
         parse_mode="HTML",
     )
@@ -745,20 +762,46 @@ async def on_search_query(message: Message, state: FSMContext, db: Database):
             await message.answer("❌ Товар с таким ID не найден в базе.")
             return
 
+    # ── Поиск по штрихкоду (если введены только цифры) ────────────────────────
+    if _looks_like_barcode(text):
+        barcode = text.replace(" ", "").replace("-", "")
+        await _do_manual_search(
+            message, state, db, item_idx,
+            query="", barcode=barcode, label=f"штрихкоду <code>{barcode}</code>",
+        )
+        return
+
     # ── Обычный текстовый поиск ───────────────────────────────────────────────
     if len(text) < 2:
         await message.answer("Введите не менее 2 символов.")
         return
 
+    await _do_manual_search(
+        message, state, db, item_idx,
+        query=text, barcode=None, label=f"«{text}»",
+    )
+
+
+async def _do_manual_search(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    item_idx: int,
+    query: str,
+    barcode: Optional[str],
+    label: str,
+):
+    """Общая логика ручного поиска: по тексту и/или штрихкоду."""
     products = await db.get_all_products()
     matcher  = ProductMatcher(products)
-    _, matches = matcher.find_matches(text, top_n=8, suggest_threshold=0.08)
+    _, matches = matcher.find_matches(
+        query, barcode=barcode, top_n=8, suggest_threshold=0.08,
+    )
 
     if not matches:
         await message.answer(
-            f"❌ По запросу <b>«{text}»</b> ничего не найдено.\n\n"
-            "Попробуйте другое название, часть бренда или категорию — "
-            "или воспользуйтесь кнопками ниже:",
+            f"❌ По {label} ничего не найдено.\n\n"
+            "Попробуйте другой запрос — или воспользуйтесь кнопками ниже:",
             reply_markup=search_cancel_keyboard(item_idx),
             parse_mode="HTML",
         )
@@ -771,7 +814,6 @@ async def on_search_query(message: Message, state: FSMContext, db: Database):
         )]
         for m in matches
     ]
-    # Дополнительный ряд: искать снова / пропустить / добавить
     btns.append([
         InlineKeyboardButton(
             text="🔍 Искать снова",
@@ -791,7 +833,7 @@ async def on_search_query(message: Message, state: FSMContext, db: Database):
 
     await state.set_state(InvoiceState.reviewing)
     await message.answer(
-        f"🔎 Результаты по <b>«{text}»</b>:",
+        f"🔎 Результаты по {label}:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
         parse_mode="HTML",
     )
@@ -1207,6 +1249,51 @@ async def _handle_barcode_photo(message: Message, state: FSMContext, db: Databas
             "Или пропустите штрихкод:",
             reply_markup=barcode_skip_keyboard(item_idx),
         )
+
+
+async def _handle_search_barcode_photo(message: Message, state: FSMContext, db: Database):
+    """
+    Фото в режиме ручного поиска: считываем штрихкод и ищем товар в базе.
+    """
+    data     = await state.get_data()
+    item_idx = data.get("searching_item_idx")
+    if item_idx is None:
+        return
+
+    status = await message.answer("🔍 Считываю штрихкод через Gemini…")
+
+    photo = message.photo[-1]
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        await message.bot.download(photo, destination=tmp_path)
+        barcode = await extract_barcode(tmp_path)
+    except Exception:
+        logger.exception("Ошибка при считывании штрихкода в режиме поиска")
+        await status.edit_text("❌ Ошибка при обработке фото. Попробуйте ещё раз.")
+        return
+    finally:
+        os.unlink(tmp_path)
+
+    if not barcode:
+        await status.edit_text(
+            "❌ Не удалось считать штрихкод с фото.\n\n"
+            "Попробуйте сфотографировать чётче или введите цифры штрихкода вручную.",
+            reply_markup=search_cancel_keyboard(item_idx),
+        )
+        return
+
+    await status.edit_text(
+        f"✅ Штрихкод считан: <code>{barcode}</code>\nИщу в базе…",
+        parse_mode="HTML",
+    )
+
+    await _do_manual_search(
+        message, state, db, item_idx,
+        query="", barcode=barcode,
+        label=f"штрихкоду <code>{barcode}</code>",
+    )
 
 
 @router.callback_query(SkipBarcodeCb.filter(), InvoiceState.barcode_photo)

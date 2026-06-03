@@ -4,10 +4,20 @@ import shutil
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile, Message
 
 from config import ALLOWED_USERS, DATABASE_PATH, LOG_FILE
 from db.database import Database
+from keyboards.kb import (
+    BTN_ALIASES,
+    BTN_CANCEL,
+    BTN_CATALOG,
+    BTN_HELP,
+    BTN_STATS,
+    BTN_UPLOAD,
+    main_menu_keyboard,
+)
 
 router = Router()
 
@@ -54,8 +64,10 @@ async def cmd_start(message: Message):
         "/aliases — выученные псевдонимы поставщиков\n"
         "/logs — последние строки лога (для отладки)\n"
         "/cancel — отменить текущую обработку\n"
-        "/help — подробная инструкция",
+        "/help — подробная инструкция\n\n"
+        "💡 <i>Меню снизу — быстрый доступ к командам.</i>",
         parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -219,3 +231,53 @@ async def cmd_stats(message: Message, db: Database):
         f"Выученных псевдонимов: <b>{aliases:,}</b>",
         parse_mode="HTML",
     )
+
+
+# ── Обработчики reply-кнопок главного меню ──────────────────────────────────
+# Каждая кнопка делегирует работу соответствующей команде.
+
+@router.message(F.text == BTN_UPLOAD)
+async def btn_upload(message: Message):
+    if not _allowed(message.from_user.id):
+        return
+    # Локальный импорт чтобы избежать циклической зависимости
+    from handlers.catalog import cmd_upload
+    await cmd_upload(message)
+
+
+@router.message(F.text == BTN_CATALOG)
+async def btn_catalog(message: Message, db: Database):
+    if not _allowed(message.from_user.id):
+        return
+    from handlers.catalog import cmd_catalog
+    await cmd_catalog(message, db)
+
+
+@router.message(F.text == BTN_ALIASES)
+async def btn_aliases(message: Message, db: Database):
+    if not _allowed(message.from_user.id):
+        return
+    from handlers.catalog import cmd_aliases
+    await cmd_aliases(message, db)
+
+
+@router.message(F.text == BTN_STATS)
+async def btn_stats(message: Message, db: Database):
+    if not _allowed(message.from_user.id):
+        return
+    await cmd_stats(message, db)
+
+
+@router.message(F.text == BTN_CANCEL)
+async def btn_cancel(message: Message, state: FSMContext):
+    if not _allowed(message.from_user.id):
+        return
+    from handlers.invoice import cmd_cancel
+    await cmd_cancel(message, state)
+
+
+@router.message(F.text == BTN_HELP)
+async def btn_help(message: Message):
+    if not _allowed(message.from_user.id):
+        return
+    await cmd_help(message)

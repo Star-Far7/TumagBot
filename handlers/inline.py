@@ -1,8 +1,13 @@
 """
 Инлайн-поиск товаров: @botname <запрос> в любом чате.
+
+Запрос может быть:
+  • названием товара или его частью (≥ 2 символа)
+  • штрихкодом (4-20 цифр) — точный поиск по barcode/extra_code
 """
 import hashlib
 import logging
+import re
 
 from aiogram import Router
 from aiogram.types import (
@@ -17,6 +22,13 @@ from services.product_matcher import ProductMatcher
 logger = logging.getLogger(__name__)
 router = Router()
 
+_BARCODE_RE = re.compile(r"^\d{4,20}$")
+
+
+def _looks_like_barcode(text: str) -> bool:
+    cleaned = text.replace(" ", "").replace("-", "")
+    return bool(_BARCODE_RE.match(cleaned))
+
 
 @router.inline_query()
 async def inline_search(query: InlineQuery, db: Database):
@@ -27,14 +39,24 @@ async def inline_search(query: InlineQuery, db: Database):
             [],
             is_personal=True,
             cache_time=1,
-            switch_pm_text="Введите название товара",
+            switch_pm_text="Введите название или штрихкод",
             switch_pm_parameter="inline_hint",
         )
         return
 
     products = await db.get_all_products()
     matcher  = ProductMatcher(products)
-    _, matches = matcher.find_matches(search_text, top_n=10, suggest_threshold=0.12)
+
+    # Поиск по штрихкоду, если запрос — только цифры
+    if _looks_like_barcode(search_text):
+        barcode = search_text.replace(" ", "").replace("-", "")
+        _, matches = matcher.find_matches(
+            query="", barcode=barcode, top_n=10, suggest_threshold=0.12,
+        )
+    else:
+        _, matches = matcher.find_matches(
+            search_text, top_n=10, suggest_threshold=0.12,
+        )
 
     results = []
     for m in matches:

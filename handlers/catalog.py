@@ -199,14 +199,23 @@ def _extract_product(row: Dict) -> Optional[Dict]:
         return None
 
     ext_id = _col(row, ["id", "код", "внешний код", "артикул", "external_id", "код товара"])
+
+    barcode = _col(row, ["штрихкод", "штрих-код", "штрихкод товара",
+                          "barcode", "ean", "ean13", "ean-13", "код товара (ean)"])
+
+    # Fallback для external_id: если в файле нет уникального ID, используем штрихкод.
+    # Это критично для товаров с одинаковыми названиями но разными штрихкодами —
+    # иначе они конфликтуют по UNIQUE(external_id) и второй перезаписывает первого.
     if not ext_id:
-        ext_id = f"name_{name[:60]}"
+        if barcode:
+            ext_id = f"bc_{barcode}"
+        else:
+            ext_id = f"name_{name[:60]}"
 
     return {
         "external_id":    ext_id,
         "name":           name,
-        "barcode":        _col(row, ["штрихкод", "штрих-код", "штрихкод товара",
-                                      "barcode", "ean", "ean13", "ean-13", "код товара (ean)"]),
+        "barcode":        barcode,
         "extra_code":     _col(row, ["дополнительный код", "доп. код", "доп.код", "допкод",
                                       "дополнительный штрихкод", "доп. штрихкод", "доп штрихкод",
                                       "extra_code", "additional_code", "alt_barcode", "код2"]),
